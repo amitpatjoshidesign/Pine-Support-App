@@ -1,0 +1,76 @@
+{
+  "Static": {
+    "Font": {
+      "Brand": {
+        "$type": "string",
+        "$value": "Google Sans Flex",
+        "$extensions": {
+          "com.figma.variableId": "VariableID:55064:15503",
+          "com.figma.type": "string",
+          "com.figma.isOverride": true
+        }
+      },
+      "Plain": {
+        "$type": "string",
+        "$value": "Google Sans Flex",
+        "$extensions": {
+          "com.figma.variableId": "VariableID:55064:15504",
+          "com.figma.type": "string",
+          "com.figma.isOverride": true
+        }
+      }
+    },
+    "Weight": {
+      "Regular": {
+        "$type": "string",
+        "$value": "Regular",
+        "$extensions": {
+          "com.figma.variableId": "VariableID:55064:15505",
+          "com.figma.type": "string",
+          "com.figma.isOverride": true
+        }
+      },
+      "Medium": {
+        "$type": "string",
+        "$value": "Medium",
+        "$extensions": {
+          "com.figma.variableId": "VariableID:55064:15506",
+          "com.figma.type": "string",
+          "com.figma.isOverride": true
+        }
+      },
+      "Bold": {
+        "$type": "string",
+        "$value": "SemiBold",
+        "$extensions": {
+          "com.figma.variableId": "VariableID:55064:15507",
+          "com.figma.type": "string",
+          "com.figma.isOverride": true
+        }
+      }
+    }
+  },
+  "Tracking": {
+    "None": {
+      "$type": "number",
+      "$value": 0,
+      "$extensions": {
+        "com.figma.variableId": "VariableID:58148:19218",
+        "com.figma.hiddenFromPublishing": true,
+        "com.figma.isOverride": true
+      }
+    },
+    "Small": {
+      "$type": "number",
+      "$value": 0.10000000149011612,
+      "$extensions": {
+        "com.figma.variableId": "VariableID:58148:19217",
+        "com.figma.hiddenFromPublishing": true,
+        "com.figma.isOverride": true
+      }
+    }
+  },
+  "$extensions": {
+    "com.figma.modeName": "Baseline"
+  }
+}
