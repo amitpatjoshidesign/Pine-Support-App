@@ -111,6 +111,36 @@ class SupportFaqContent {
     return answers[subtopic];
   }
 
+  static List<SupportFaqAnswer> relatedAnswersFor(String subtopic) {
+    final primary = answerFor(subtopic);
+    if (primary == null) return const [];
+
+    final related = <SupportFaqAnswer>[];
+    final seenTitles = <String>{};
+
+    void addAnswer(SupportFaqAnswer answer) {
+      if (seenTitles.add(answer.title)) {
+        related.add(answer);
+      }
+    }
+
+    addAnswer(primary);
+
+    for (final entry in subtopicsByTopic.entries) {
+      if (!entry.value.contains(subtopic)) continue;
+
+      for (final candidate in entry.value) {
+        if (candidate == subtopic || !hasExactMatch(candidate)) continue;
+        final answer = answerFor(candidate);
+        if (answer == null) continue;
+        addAnswer(answer);
+        if (related.length == 3) return related;
+      }
+    }
+
+    return related;
+  }
+
   static String classifyManualQuery(String query) {
     final normalized = query.toLowerCase();
     if (normalized.contains('sim') ||

@@ -35,6 +35,7 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   phosphor_flutter: ^2.1.0
+  video_player: ^2.11.1
 
 dev_dependencies:
   flutter_test:
@@ -62,6 +63,7 @@ flutter:
     - assets/images/tutorial_wifi.png
     - assets/images/tutorial_wifi_overlay.png
     - assets/images/tutorial_item_3.png
+    - Video/YTDown_YouTube_Mini-_-Mini-Pro-Connect-to-WiFi-English_Media_AWQkdilhcmM_002_720p.mp4
 
   fonts:
     - family: Google Sans Flex

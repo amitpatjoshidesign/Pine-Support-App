@@ -4,12 +4,76 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:phosphor_flutter/phosphor_flutter.dart';
 
+import '../../../theme/support_motion.dart';
 import '../../../theme/support_tokens.dart';
 import '../domain/support_faq.dart';
+import 'video_playback_screen.dart';
 
 const double _maxReplyMessageWidth = 380;
-const double _maxSentMessageWidth = 300;
+const double _maxSentMessageWidth = _maxReplyMessageWidth;
 const Color _secondaryStateLayerOpacity16 = Color(0x29625B71);
+const Color _healthCheckSuccess = Color(0xFF4B662C);
+
+const List<_SupportStore> _supportStores = [
+  _SupportStore(
+    storeId: '7781',
+    name: 'Apollo Hospital Sarita Vihar Del',
+    devices: [
+      _SupportDevice(label: 'Go • A50 • 157213'),
+      _SupportDevice(label: 'Mini • A910 • 582044'),
+    ],
+  ),
+  _SupportStore(
+    storeId: '44085',
+    name: 'Apollo Uttaranchal Plaza',
+    devices: [_SupportDevice(label: 'Go • A50 • 440850')],
+  ),
+  _SupportStore(
+    storeId: '52055',
+    name: 'Apollo Pharmacy',
+    devices: [_SupportDevice(label: 'Mini Pro • D180 • 520551')],
+  ),
+  _SupportStore(
+    storeId: '51854',
+    name: 'Apollo Hospital Mathura road',
+    devices: [_SupportDevice(label: 'Go • A50 • 518540')],
+  ),
+  _SupportStore(
+    storeId: '62917',
+    name: 'Fortis Hospital, Shalimar Bagh',
+    devices: [_SupportDevice(label: 'Mini • A910 • 629171')],
+  ),
+  _SupportStore(
+    storeId: '73422',
+    name: 'Max Super Specialty Hospital, Saket',
+    devices: [_SupportDevice(label: 'Go • A50 • 734221')],
+  ),
+  _SupportStore(
+    storeId: '84139',
+    name: 'AIIMS, New Delhi',
+    devices: [_SupportDevice(label: 'Mini Pro • D180 • 841390')],
+  ),
+];
+
+class _SupportStore {
+  const _SupportStore({
+    required this.storeId,
+    required this.name,
+    required this.devices,
+  });
+
+  final String storeId;
+  final String name;
+  final List<_SupportDevice> devices;
+
+  String get label => '$storeId: $name';
+}
+
+class _SupportDevice {
+  const _SupportDevice({required this.label});
+
+  final String label;
+}
 
 class ChatConversationScreen extends StatefulWidget {
   const ChatConversationScreen({
@@ -27,12 +91,18 @@ class ChatConversationScreen extends StatefulWidget {
 
 class _ChatConversationScreenState extends State<ChatConversationScreen> {
   final TextEditingController _queryController = TextEditingController();
+  final FocusNode _queryFocusNode = FocusNode();
+  final ScrollController _conversationScrollController = ScrollController();
   _ConversationStage _stage = _ConversationStage.topicGroup;
   String? _selectedTopicGroup;
   String? _selectedSubtopic;
   String? _manualQuery;
+  String? _deviceLookupMethod;
+  _SupportStore? _selectedStore;
+  _SupportDevice? _selectedDevice;
   bool _healthCheckComplete = false;
   Timer? _loadingTimer;
+  Timer? _scrollSettlingTimer;
 
   SupportFaqAnswer? get _selectedAnswer {
     final subtopic = _selectedSubtopic;
@@ -50,6 +120,9 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     return switch (_stage) {
       _ConversationStage.answer ||
       _ConversationStage.unresolved ||
+      _ConversationStage.deviceLookupMethod ||
+      _ConversationStage.storeSelection ||
+      _ConversationStage.deviceSelection ||
       _ConversationStage.healthCheckLoading ||
       _ConversationStage.healthCheckResult ||
       _ConversationStage.ticketRaised ||
@@ -77,19 +150,55 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
   @override
   void dispose() {
     _loadingTimer?.cancel();
+    _scrollSettlingTimer?.cancel();
     _queryController.dispose();
+    _queryFocusNode.dispose();
+    _conversationScrollController.dispose();
     super.dispose();
+  }
+
+  void _focusQueryInput() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _queryFocusNode.requestFocus();
+    });
+  }
+
+  void _scrollConversationToBottom() {
+    _scrollSettlingTimer?.cancel();
+
+    void scrollToExtent() {
+      if (!mounted || !_conversationScrollController.hasClients) return;
+      _conversationScrollController.animateTo(
+        _conversationScrollController.position.maxScrollExtent,
+        duration: SupportMotionTokens.medium,
+        curve: SupportMotionTokens.emphasizedDecelerate,
+      );
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      scrollToExtent();
+      _scrollSettlingTimer = Timer(SupportMotionTokens.medium, scrollToExtent);
+    });
   }
 
   void _restart() {
     _loadingTimer?.cancel();
+    _scrollSettlingTimer?.cancel();
     setState(() {
       _stage = _ConversationStage.topicGroup;
       _selectedTopicGroup = null;
       _selectedSubtopic = null;
       _manualQuery = null;
-      _healthCheckComplete = false;
+      _resetDeviceHealthState();
     });
+  }
+
+  void _resetDeviceHealthState() {
+    _deviceLookupMethod = null;
+    _selectedStore = null;
+    _selectedDevice = null;
+    _healthCheckComplete = false;
   }
 
   void _selectTopicGroup(String topicGroup) {
@@ -98,7 +207,7 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
       _selectedTopicGroup = topicGroup;
       _selectedSubtopic = null;
       _manualQuery = null;
-      _healthCheckComplete = false;
+      _resetDeviceHealthState();
       _stage = _ConversationStage.subtopic;
     });
   }
@@ -108,16 +217,20 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     setState(() {
       _selectedSubtopic = subtopic;
       _manualQuery = null;
-      _healthCheckComplete = false;
+      _resetDeviceHealthState();
       _stage = _ConversationStage.loading;
     });
     _loadingTimer = Timer(const Duration(milliseconds: 650), () {
       if (!mounted) return;
+      final hasExactMatch = SupportFaqContent.hasExactMatch(subtopic);
       setState(() {
-        _stage = SupportFaqContent.hasExactMatch(subtopic)
+        _stage = hasExactMatch
             ? _ConversationStage.answer
             : _ConversationStage.needsElaboration;
       });
+      if (!hasExactMatch) {
+        _focusQueryInput();
+      }
     });
   }
 
@@ -130,7 +243,7 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     setState(() {
       _manualQuery = query;
       _selectedSubtopic = mappedSubtopic;
-      _healthCheckComplete = false;
+      _resetDeviceHealthState();
       _stage = _ConversationStage.manualTriage;
     });
   }
@@ -138,6 +251,7 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
   void _markResolved() {
     _loadingTimer?.cancel();
     setState(() => _stage = _ConversationStage.resolved);
+    _scrollConversationToBottom();
   }
 
   void _markUnresolved() {
@@ -149,16 +263,87 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (!_canRunDeviceCheck) return;
     _loadingTimer?.cancel();
     setState(() {
-      _stage = _ConversationStage.healthCheckLoading;
-      _healthCheckComplete = false;
+      _resetDeviceHealthState();
+      _stage = _ConversationStage.deviceLookupMethod;
     });
+    _scrollConversationToBottom();
+  }
+
+  void _selectDeviceLookupMethod(String method) {
+    setState(() {
+      _deviceLookupMethod = method;
+      _selectedStore = null;
+      _selectedDevice = null;
+      _healthCheckComplete = false;
+      _stage = _ConversationStage.storeSelection;
+    });
+    _scrollConversationToBottom();
+  }
+
+  Future<void> _openStoreSelectionSheet() async {
+    final store = await showModalBottomSheet<_SupportStore>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.32),
+      builder: (context) {
+        return _SelectionBottomSheet<_SupportStore>(
+          title: 'Select a store',
+          options: _supportStores,
+          selected: _selectedStore,
+          optionLabel: (store) => store.label,
+        );
+      },
+    );
+
+    if (store == null || !mounted) return;
+    setState(() {
+      _selectedStore = store;
+      _selectedDevice = null;
+      _healthCheckComplete = false;
+      _stage = _ConversationStage.deviceSelection;
+    });
+    _scrollConversationToBottom();
+  }
+
+  Future<void> _openDeviceSelectionSheet() async {
+    final store = _selectedStore;
+    if (store == null) return;
+
+    final device = await showModalBottomSheet<_SupportDevice>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.32),
+      builder: (context) {
+        return _SelectionBottomSheet<_SupportDevice>(
+          title: 'Select a device',
+          options: store.devices,
+          selected: _selectedDevice,
+          optionLabel: (device) => device.label,
+        );
+      },
+    );
+
+    if (device == null || !mounted) return;
+    setState(() {
+      _selectedDevice = device;
+      _healthCheckComplete = false;
+      _stage = _ConversationStage.healthCheckLoading;
+    });
+    _scrollConversationToBottom();
     _loadingTimer = Timer(const Duration(milliseconds: 900), () {
       if (!mounted) return;
       setState(() {
         _healthCheckComplete = true;
         _stage = _ConversationStage.healthCheckResult;
       });
+      _scrollConversationToBottom();
     });
+  }
+
+  void _addAdditionalProblem() {
+    _focusQueryInput();
   }
 
   void _raiseTicket() {
@@ -231,13 +416,32 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
             children: [
               Expanded(
                 child: ListView(
+                  controller: _conversationScrollController,
+                  physics: const ClampingScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
                   children: _buildConversation(context),
                 ),
               ),
-              _ConversationInputBar(
-                controller: _queryController,
-                onSubmitted: _submitTypedQuery,
+              AnimatedSwitcher(
+                duration: SupportMotionTokens.medium,
+                switchInCurve: SupportMotionTokens.emphasizedDecelerate,
+                switchOutCurve: SupportMotionTokens.emphasizedAccelerate,
+                transitionBuilder: (child, animation) => SizeTransition(
+                  sizeFactor: animation,
+                  axisAlignment: -1,
+                  child: FadeTransition(opacity: animation, child: child),
+                ),
+                child: _stage == _ConversationStage.resolved
+                    ? _ConversationClosedFooter(
+                        key: const ValueKey('conversation-closed-footer'),
+                        onRestart: _restart,
+                      )
+                    : _ConversationInputBar(
+                        key: const ValueKey('conversation-input-bar'),
+                        controller: _queryController,
+                        focusNode: _queryFocusNode,
+                        onSubmitted: _submitTypedQuery,
+                      ),
               ),
             ],
           ),
@@ -246,16 +450,32 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     );
   }
 
+  Widget _entry(
+    String id,
+    Widget child, {
+    _EntryOrigin origin = _EntryOrigin.assistant,
+    Duration delay = Duration.zero,
+  }) {
+    return _ConversationMotionEntry(
+      key: ValueKey('conversation-entry-$id'),
+      origin: origin,
+      delay: delay,
+      child: child,
+    );
+  }
+
   List<Widget> _buildConversation(BuildContext context) {
     final widgets = <Widget>[
-      _AssistantMessage(
-        text:
-            'Choose the topic group that best matches your problem. This helps me classify it before we troubleshoot.',
-        showActions: false,
-        quickReplies: _stage == _ConversationStage.topicGroup
-            ? SupportFaqContent.topicGroups
-            : const [],
-        onQuickReply: _selectTopicGroup,
+      _entry(
+        'assistant-topic-group',
+        _AssistantMessage(
+          text: 'Pick the area closest to your problem',
+          showActions: false,
+          quickReplies: _stage == _ConversationStage.topicGroup
+              ? SupportFaqContent.topicGroups
+              : const [],
+          onQuickReply: _selectTopicGroup,
+        ),
       ),
     ];
 
@@ -263,35 +483,57 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (topicGroup != null) {
       widgets.addAll([
         const SizedBox(height: 8),
-        _UserMessage(text: topicGroup),
+        _entry(
+          'user-topic-$topicGroup',
+          _UserMessage(text: topicGroup),
+          origin: _EntryOrigin.user,
+        ),
         const SizedBox(height: 24),
-        _AssistantMessage(
-          text:
-              'Now choose the subtopic. If there is an exact FAQ or video match, I’ll show it right away.',
-          showActions: false,
-          quickReplies: _stage == _ConversationStage.subtopic
-              ? SupportFaqContent.subtopicsFor(topicGroup)
-              : const [],
-          onQuickReply: _selectSubtopic,
+        _entry(
+          'assistant-subtopic-$topicGroup',
+          _AssistantMessage(
+            text: 'What exactly is happening',
+            showActions: false,
+            quickReplies: _stage == _ConversationStage.subtopic
+                ? SupportFaqContent.subtopicsFor(topicGroup)
+                : const [],
+            onQuickReply: _selectSubtopic,
+          ),
         ),
       ]);
     }
 
     final subtopic = _selectedSubtopic;
     if (subtopic != null) {
-      widgets.addAll([const SizedBox(height: 8), _UserMessage(text: subtopic)]);
+      widgets.addAll([
+        const SizedBox(height: 8),
+        _entry(
+          'user-subtopic-$subtopic',
+          _UserMessage(text: subtopic),
+          origin: _EntryOrigin.user,
+        ),
+      ]);
     }
 
+    Widget? responseChild;
+    String? responseKey;
     if (_stage == _ConversationStage.loading) {
-      widgets.addAll([const SizedBox(height: 24), const _LoadingResponse()]);
+      responseKey = 'loading-$subtopic';
+      responseChild = const _LoadingResponse();
+    } else if (_shouldShowSelectedAnswer) {
+      responseKey = 'answer-$subtopic';
+      responseChild = _FaqAnswerMessage(
+        subtopic: _selectedSubtopic!,
+        answer: _selectedAnswer!,
+      );
     }
 
-    if (_shouldShowSelectedAnswer) {
+    if (responseChild != null && responseKey != null) {
       widgets.addAll([
         const SizedBox(height: 24),
-        _FaqAnswerMessage(
-          answer: _selectedAnswer!,
-          onRunDeviceCheck: _canRunDeviceCheck ? _runDeviceHealthCheck : null,
+        _ConversationResponseSwitcher(
+          switchKey: responseKey,
+          child: responseChild,
         ),
       ]);
     }
@@ -299,9 +541,13 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (_stage == _ConversationStage.answer) {
       widgets.addAll([
         const SizedBox(height: 16),
-        _ResolutionChoices(
-          onResolved: _markResolved,
-          onUnresolved: _markUnresolved,
+        _entry(
+          'resolution-$subtopic',
+          _ResolutionChoices(
+            onResolved: _markResolved,
+            onUnresolved: _markUnresolved,
+          ),
+          origin: _EntryOrigin.panel,
         ),
       ]);
     }
@@ -309,12 +555,14 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (_stage == _ConversationStage.needsElaboration) {
       widgets.addAll([
         const SizedBox(height: 24),
-        _AssistantMessage(
-          text:
-              'I don’t have an exact FAQ or video match for this subtopic yet. Please elaborate your problem through chat so I can classify it better.',
-          showActions: true,
-          quickReplies: const [],
-          onQuickReply: (_) {},
+        _entry(
+          'assistant-elaborate-$subtopic',
+          _AssistantMessage(
+            text: "Hmm, nothing here yet. Describe what's going on",
+            showActions: true,
+            quickReplies: const [],
+            onQuickReply: (_) {},
+          ),
         ),
       ]);
     }
@@ -323,7 +571,11 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (manualQuery != null) {
       widgets.addAll([
         const SizedBox(height: 8),
-        _UserMessage(text: manualQuery),
+        _entry(
+          'user-manual-$manualQuery',
+          _UserMessage(text: manualQuery),
+          origin: _EntryOrigin.user,
+        ),
       ]);
     }
 
@@ -331,19 +583,26 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
       final answer = _selectedAnswer;
       widgets.addAll([
         const SizedBox(height: 24),
-        _AssistantMessage(
-          text: answer == null
-              ? 'I still need a little more detail to find an exact FAQ. You can add more context or raise a ticket.'
-              : 'I mapped this to ${answer.title}. Since this path ${answer.deviceCheck ? 'supports' : 'does not need'} a device health check, choose the next step.',
-          showActions: true,
-          quickReplies: const [],
-          onQuickReply: (_) {},
+        _entry(
+          'assistant-manual-triage-$manualQuery',
+          _AssistantMessage(
+            text: answer == null
+                ? 'I still need a little more detail to find an exact FAQ. You can add more context or raise a ticket.'
+                : "Let's check the device. That usually tells us what's wrong.",
+            showActions: true,
+            quickReplies: const [],
+            onQuickReply: (_) {},
+          ),
         ),
         const SizedBox(height: 16),
-        _NextStepChoices(
-          canRunDeviceCheck: _canRunDeviceCheck,
-          onRunDeviceCheck: _runDeviceHealthCheck,
-          onRaiseTicket: _raiseTicket,
+        _entry(
+          'manual-next-steps-$manualQuery',
+          _NextStepChoices(
+            canRunDeviceCheck: _canRunDeviceCheck,
+            onRunDeviceCheck: _runDeviceHealthCheck,
+            onRaiseTicket: _raiseTicket,
+          ),
+          origin: _EntryOrigin.panel,
         ),
       ]);
     }
@@ -351,45 +610,156 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (_stage == _ConversationStage.unresolved) {
       widgets.addAll([
         const SizedBox(height: 8),
-        const _UserMessage(text: 'No, raise a ticket'),
+        _entry(
+          'user-unresolved-$subtopic',
+          const _UserMessage(text: 'No, raise a ticket'),
+          origin: _EntryOrigin.user,
+        ),
         const SizedBox(height: 24),
-        _AssistantMessage(
-          text:
-              'Tell me what happened after trying the FAQ steps. If this category supports it, I can run a device health check before raising a ticket.',
-          showActions: true,
-          quickReplies: const [],
-          onQuickReply: (_) {},
+        _entry(
+          'assistant-unresolved-$subtopic',
+          _AssistantMessage(
+            text:
+                'Tell me what happened after trying the FAQ steps. If this category supports it, I can run a device health check before raising a ticket.',
+            showActions: true,
+            quickReplies: const [],
+            onQuickReply: (_) {},
+          ),
         ),
         const SizedBox(height: 16),
-        _NextStepChoices(
-          canRunDeviceCheck: _canRunDeviceCheck,
-          onRunDeviceCheck: _runDeviceHealthCheck,
-          onRaiseTicket: _raiseTicket,
+        _entry(
+          'unresolved-next-steps-$subtopic',
+          _NextStepChoices(
+            canRunDeviceCheck: _canRunDeviceCheck,
+            onRunDeviceCheck: _runDeviceHealthCheck,
+            onRaiseTicket: _raiseTicket,
+          ),
+          origin: _EntryOrigin.panel,
         ),
       ]);
+    }
+
+    final isDeviceHealthFlow = switch (_stage) {
+      _ConversationStage.deviceLookupMethod ||
+      _ConversationStage.storeSelection ||
+      _ConversationStage.deviceSelection ||
+      _ConversationStage.healthCheckLoading ||
+      _ConversationStage.healthCheckResult => true,
+      _ => false,
+    };
+    if (isDeviceHealthFlow) {
+      final deviceLookupMethod = _deviceLookupMethod;
+      final selectedStore = _selectedStore;
+      final selectedDevice = _selectedDevice;
+
+      widgets.addAll([
+        const SizedBox(height: 24),
+        _entry(
+          'assistant-device-lookup',
+          _AssistantMessage(
+            text: 'Please help me find the device you need help with',
+            showActions: true,
+            quickReplies: _stage == _ConversationStage.deviceLookupMethod
+                ? const ['Search device by store']
+                : const [],
+            onQuickReply: _selectDeviceLookupMethod,
+          ),
+        ),
+      ]);
+
+      if (deviceLookupMethod != null) {
+        widgets.addAll([
+          const SizedBox(height: 8),
+          _entry(
+            'user-device-lookup-method',
+            _UserMessage(text: deviceLookupMethod),
+            origin: _EntryOrigin.user,
+          ),
+          const SizedBox(height: 24),
+          _entry(
+            'assistant-store-selection',
+            selectedStore == null
+                ? _AssistantPickerMessage(
+                    text: 'Which store is your device at?',
+                    label: 'Search device by store',
+                    onTap: _openStoreSelectionSheet,
+                  )
+                : const _AssistantMessage(
+                    text: 'Which store is your device at?',
+                    showActions: true,
+                    quickReplies: [],
+                    onQuickReply: _noopQuickReply,
+                  ),
+          ),
+        ]);
+      }
+
+      if (selectedStore != null) {
+        widgets.addAll([
+          const SizedBox(height: 8),
+          _entry(
+            'user-selected-store-${selectedStore.storeId}',
+            _UserMessage(text: selectedStore.label),
+            origin: _EntryOrigin.user,
+          ),
+          const SizedBox(height: 24),
+          _entry(
+            'assistant-device-selection',
+            selectedDevice == null
+                ? _AssistantPickerMessage(
+                    text: 'Which device do you need help with?',
+                    label: 'Select device',
+                    onTap: _openDeviceSelectionSheet,
+                  )
+                : const _AssistantMessage(
+                    text: 'Which device do you need help with?',
+                    showActions: true,
+                    quickReplies: [],
+                    onQuickReply: _noopQuickReply,
+                  ),
+          ),
+        ]);
+      }
+
+      if (selectedDevice != null) {
+        widgets.addAll([
+          const SizedBox(height: 8),
+          _entry(
+            'user-selected-device-${selectedDevice.label}',
+            _UserMessage(text: selectedDevice.label),
+            origin: _EntryOrigin.user,
+          ),
+        ]);
+      }
     }
 
     if (_stage == _ConversationStage.healthCheckLoading) {
       widgets.addAll([
         const SizedBox(height: 24),
-        const _AssistantMessage(
-          text: 'Running device health check…',
-          showActions: false,
-          quickReplies: [],
-          onQuickReply: _noopQuickReply,
+        _entry(
+          'health-check-loading-response-$subtopic',
+          _HealthCheckReportMessage(
+            device: _selectedDevice,
+            complete: false,
+            onRaiseTicket: _raiseTicket,
+            onAddAdditionalProblem: _addAdditionalProblem,
+          ),
         ),
-        const SizedBox(height: 16),
-        const _LoadingResponse(),
       ]);
     }
 
     if (_stage == _ConversationStage.healthCheckResult) {
       widgets.addAll([
         const SizedBox(height: 24),
-        _HealthCheckResult(
-          complete: _healthCheckComplete,
-          onRaiseTicket: _raiseTicket,
-          onResolved: _markResolved,
+        _entry(
+          'health-check-result-$subtopic',
+          _HealthCheckReportMessage(
+            device: _selectedDevice,
+            complete: _healthCheckComplete,
+            onRaiseTicket: _raiseTicket,
+            onAddAdditionalProblem: _addAdditionalProblem,
+          ),
+          origin: _EntryOrigin.panel,
         ),
       ]);
     }
@@ -397,10 +767,14 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (_stage == _ConversationStage.ticketRaised) {
       widgets.addAll([
         const SizedBox(height: 24),
-        _TicketRaisedCard(
-          topicGroup: _selectedTopicGroup,
-          subtopic: _selectedSubtopic,
-          manualQuery: _manualQuery,
+        _entry(
+          'ticket-raised-$subtopic-$manualQuery',
+          _TicketRaisedCard(
+            topicGroup: _selectedTopicGroup,
+            subtopic: _selectedSubtopic,
+            manualQuery: _manualQuery,
+          ),
+          origin: _EntryOrigin.panel,
         ),
       ]);
     }
@@ -408,9 +782,11 @@ class _ChatConversationScreenState extends State<ChatConversationScreen> {
     if (_stage == _ConversationStage.resolved) {
       widgets.addAll([
         const SizedBox(height: 8),
-        const _UserMessage(text: 'Yes, it’s solved'),
-        const SizedBox(height: 24),
-        _ConversationClosedPanel(onRestart: _restart),
+        _entry(
+          'user-resolved-$subtopic',
+          const _UserMessage(text: 'Yes, it’s solved'),
+          origin: _EntryOrigin.user,
+        ),
       ]);
     }
 
@@ -428,6 +804,9 @@ enum _ConversationStage {
   needsElaboration,
   manualTriage,
   unresolved,
+  deviceLookupMethod,
+  storeSelection,
+  deviceSelection,
   healthCheckLoading,
   healthCheckResult,
   ticketRaised,
@@ -435,6 +814,160 @@ enum _ConversationStage {
 }
 
 enum _ConversationMenuAction { changeTopic, restart }
+
+enum _EntryOrigin { assistant, user, panel }
+
+class _ConversationMotionEntry extends StatefulWidget {
+  const _ConversationMotionEntry({
+    super.key,
+    required this.child,
+    required this.origin,
+    this.delay = Duration.zero,
+  });
+
+  final Widget child;
+  final _EntryOrigin origin;
+  final Duration delay;
+
+  @override
+  State<_ConversationMotionEntry> createState() =>
+      _ConversationMotionEntryState();
+}
+
+class _ConversationMotionEntryState extends State<_ConversationMotionEntry>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacityAnimation;
+  late final Animation<Offset> _offsetAnimation;
+  Timer? _delayTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: SupportMotionTokens.medium,
+      vsync: this,
+    );
+    final curvedAnimation = CurvedAnimation(
+      parent: _controller,
+      curve: SupportMotionTokens.emphasizedDecelerate,
+    );
+    _opacityAnimation = curvedAnimation;
+    _offsetAnimation = Tween<Offset>(
+      begin: switch (widget.origin) {
+        _EntryOrigin.user => const Offset(0.05, 0),
+        _EntryOrigin.assistant => const Offset(0, 0.08),
+        _EntryOrigin.panel => const Offset(0, 0.05),
+      },
+      end: Offset.zero,
+    ).animate(curvedAnimation);
+
+    if (widget.delay == Duration.zero) {
+      _controller.forward();
+    } else {
+      _delayTimer = Timer(widget.delay, _controller.forward);
+    }
+  }
+
+  @override
+  void dispose() {
+    _delayTimer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations) {
+      return widget.child;
+    }
+
+    return FadeTransition(
+      opacity: _opacityAnimation,
+      child: SlideTransition(position: _offsetAnimation, child: widget.child),
+    );
+  }
+}
+
+class _ConversationResponseSwitcher extends StatelessWidget {
+  const _ConversationResponseSwitcher({
+    required this.switchKey,
+    required this.child,
+  });
+
+  final String switchKey;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations) {
+      return KeyedSubtree(key: ValueKey(switchKey), child: child);
+    }
+
+    return AnimatedSwitcher(
+      duration: SupportMotionTokens.medium,
+      reverseDuration: SupportMotionTokens.short,
+      switchInCurve: SupportMotionTokens.emphasizedDecelerate,
+      switchOutCurve: SupportMotionTokens.emphasizedAccelerate,
+      transitionBuilder: (child, animation) {
+        final slideAnimation =
+            Tween<Offset>(
+              begin: const Offset(0, 0.04),
+              end: Offset.zero,
+            ).animate(
+              CurvedAnimation(
+                parent: animation,
+                curve: SupportMotionTokens.emphasizedDecelerate,
+                reverseCurve: SupportMotionTokens.emphasizedAccelerate,
+              ),
+            );
+
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(position: slideAnimation, child: child),
+        );
+      },
+      child: KeyedSubtree(key: ValueKey(switchKey), child: child),
+    );
+  }
+}
+
+class _PressScale extends StatefulWidget {
+  const _PressScale({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PressScale> createState() => _PressScaleState();
+}
+
+class _PressScaleState extends State<_PressScale> {
+  bool _pressed = false;
+
+  void _setPressed(bool pressed) {
+    if (_pressed == pressed) return;
+    setState(() => _pressed = pressed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations) {
+      return widget.child;
+    }
+
+    return Listener(
+      onPointerDown: (_) => _setPressed(true),
+      onPointerUp: (_) => _setPressed(false),
+      onPointerCancel: (_) => _setPressed(false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.98 : 1,
+        duration: SupportMotionTokens.short,
+        curve: SupportMotionTokens.standard,
+        child: widget.child,
+      ),
+    );
+  }
+}
 
 class _AssistantMessage extends StatelessWidget {
   const _AssistantMessage({
@@ -475,6 +1008,98 @@ class _AssistantMessage extends StatelessWidget {
               _QuickReplyList(replies: quickReplies, onSelected: onQuickReply),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AssistantPickerMessage extends StatelessWidget {
+  const _AssistantPickerMessage({
+    required this.text,
+    required this.label,
+    required this.onTap,
+  });
+
+  final String text;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return _ReplyWidth(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            text,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyLarge?.copyWith(color: colorScheme.onSurface),
+          ),
+          const SizedBox(height: 14),
+          const _ConversationActions(),
+          const SizedBox(height: 16),
+          _DropdownActionChip(label: label, onTap: onTap),
+        ],
+      ),
+    );
+  }
+}
+
+class _DropdownActionChip extends StatelessWidget {
+  const _DropdownActionChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(SupportShapeTokens.full),
+      side: const BorderSide(
+        color: _secondaryStateLayerOpacity16,
+        width: 1.001,
+      ),
+    );
+
+    return _PressScale(
+      child: Material(
+        color: Colors.transparent,
+        shape: shape,
+        child: InkWell(
+          customBorder: shape,
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsetsDirectional.fromSTEB(16, 8, 8, 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  PhosphorIcon(
+                    PhosphorIcons.caretDown(PhosphorIconsStyle.fill),
+                    size: 16,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -553,9 +1178,17 @@ class _QuickReplyList extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final reply in replies) ...[
-          _QuickReplyChip(label: reply, onPressed: () => onSelected(reply)),
-          if (reply != replies.last) const SizedBox(height: 8),
+        for (var index = 0; index < replies.length; index++) ...[
+          _ConversationMotionEntry(
+            key: ValueKey('quick-reply-${replies[index]}-$index'),
+            origin: _EntryOrigin.assistant,
+            delay: Duration(milliseconds: 35 * index),
+            child: _QuickReplyChip(
+              label: replies[index],
+              onPressed: () => onSelected(replies[index]),
+            ),
+          ),
+          if (index != replies.length - 1) const SizedBox(height: 8),
         ],
       ],
     );
@@ -572,27 +1205,29 @@ class _QuickReplyChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final shape = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(SupportShapeTokens.largeIncreased),
+      borderRadius: BorderRadius.circular(SupportShapeTokens.full),
       side: const BorderSide(
         color: _secondaryStateLayerOpacity16,
         width: 1.001,
       ),
     );
 
-    return SizedBox(
-      width: double.infinity,
-      child: Material(
-        color: Colors.transparent,
-        shape: shape,
-        child: InkWell(
-          customBorder: shape,
-          onTap: onPressed,
-          child: SizedBox(
-            height: 44,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Align(
-                alignment: Alignment.centerLeft,
+    return _PressScale(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _maxReplyMessageWidth),
+        child: Material(
+          color: Colors.transparent,
+          shape: shape,
+          child: InkWell(
+            customBorder: shape,
+            onTap: onPressed,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 44),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
                 child: Text(
                   label,
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
@@ -619,7 +1254,7 @@ class _UserMessage extends StatelessWidget {
 
     return _SentMessageWidth(
       child: Container(
-        constraints: const BoxConstraints(minHeight: 44),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         decoration: BoxDecoration(
           color: colorScheme.secondaryContainer,
           borderRadius: const BorderRadius.only(
@@ -629,16 +1264,10 @@ class _UserMessage extends StatelessWidget {
             bottomRight: Radius.circular(8),
           ),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              text,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: colorScheme.onSecondaryContainer,
-              ),
-            ),
+        child: Text(
+          text,
+          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+            color: colorScheme.onSecondaryContainer,
           ),
         ),
       ),
@@ -666,73 +1295,112 @@ class _LoadingResponse extends StatelessWidget {
   }
 }
 
-class _ShimmerLine extends StatelessWidget {
+class _ShimmerLine extends StatefulWidget {
   const _ShimmerLine({this.width, this.widthFactor});
 
   final double? width;
   final double? widthFactor;
 
   @override
+  State<_ShimmerLine> createState() => _ShimmerLineState();
+}
+
+class _ShimmerLineState extends State<_ShimmerLine>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _opacityAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: SupportMotionTokens.shimmer,
+      vsync: this,
+    )..repeat(reverse: true);
+    _opacityAnimation = Tween<double>(
+      begin: 0.42,
+      end: 0.82,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    Widget line = Container(
-      height: 23,
-      width: width,
-      color: colorScheme.surfaceContainerHigh.withValues(alpha: 0.7),
-    );
+    Widget buildLine(double opacity) {
+      return Container(
+        height: 24,
+        width: widget.width,
+        color: colorScheme.surfaceContainerHigh.withValues(alpha: opacity),
+      );
+    }
 
-    if (widthFactor != null) {
-      line = FractionallySizedBox(widthFactor: widthFactor, child: line);
+    Widget line;
+    if (MediaQuery.of(context).disableAnimations) {
+      line = buildLine(0.7);
+    } else {
+      line = AnimatedBuilder(
+        animation: _opacityAnimation,
+        builder: (context, child) => buildLine(_opacityAnimation.value),
+      );
+    }
+
+    if (widget.widthFactor != null) {
+      line = FractionallySizedBox(widthFactor: widget.widthFactor, child: line);
     }
 
     return line;
   }
 }
 
-class _FaqAnswerMessage extends StatelessWidget {
-  const _FaqAnswerMessage({required this.answer, this.onRunDeviceCheck});
+class _FaqAnswerMessage extends StatefulWidget {
+  const _FaqAnswerMessage({required this.subtopic, required this.answer});
 
+  final String subtopic;
   final SupportFaqAnswer answer;
-  final VoidCallback? onRunDeviceCheck;
+
+  @override
+  State<_FaqAnswerMessage> createState() => _FaqAnswerMessageState();
+}
+
+class _FaqAnswerMessageState extends State<_FaqAnswerMessage> {
+  int _openIndex = 0;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final videoTitles = answer.videoTitles;
+    final answers = SupportFaqContent.relatedAnswersFor(widget.subtopic);
+    final showAccordion =
+        answers.length > 1 && !SupportFaqContent.hasExactMatch(widget.subtopic);
+
+    if (!showAccordion) {
+      return _SingleFaqAnswerMessage(answer: widget.answer);
+    }
 
     return _ReplyWidth(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            answer.answer,
-            style: Theme.of(
-              context,
-            ).textTheme.bodyLarge?.copyWith(color: colorScheme.onSurface),
-          ),
-          const SizedBox(height: 16),
-          _DeviceCheckCard(answer: answer, onRunDeviceCheck: onRunDeviceCheck),
-          const SizedBox(height: 16),
-          Text(
-            answer.title,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(color: colorScheme.onSurface),
-          ),
-          const SizedBox(height: 8),
-          for (var index = 0; index < answer.steps.length; index++) ...[
-            Text(
-              '${index + 1}. ${answer.steps[index]}',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+            'We found these relevant FAQs:',
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+              color: colorScheme.onSurfaceVariant,
             ),
-            if (index != answer.steps.length - 1) const SizedBox(height: 6),
-          ],
-          if (videoTitles.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            _VideoCarousel(titles: videoTitles),
+          ),
+          const SizedBox(height: 16),
+          for (var index = 0; index < answers.length; index++) ...[
+            _FaqAccordionCard(
+              answer: answers[index],
+              isOpen: index == _openIndex,
+              onTap: () => setState(() => _openIndex = index),
+            ),
+            if (index != answers.length - 1) const SizedBox(height: 12),
           ],
           const SizedBox(height: 14),
           const _ConversationActions(),
@@ -742,198 +1410,241 @@ class _FaqAnswerMessage extends StatelessWidget {
   }
 }
 
-class _DeviceCheckCard extends StatelessWidget {
-  const _DeviceCheckCard({required this.answer, this.onRunDeviceCheck});
+class _SingleFaqAnswerMessage extends StatelessWidget {
+  const _SingleFaqAnswerMessage({required this.answer});
 
   final SupportFaqAnswer answer;
-  final VoidCallback? onRunDeviceCheck;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final background = answer.deviceCheck
-        ? colorScheme.primaryContainer
-        : colorScheme.surfaceContainerHigh;
-    final foreground = answer.deviceCheck
-        ? colorScheme.onPrimaryContainer
-        : colorScheme.onSurfaceVariant;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
-      ),
+    return _ReplyWidth(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              PhosphorIcon(
-                answer.deviceCheck
-                    ? PhosphorIcons.pulse(PhosphorIconsStyle.regular)
-                    : PhosphorIcons.info(PhosphorIconsStyle.regular),
-                color: foreground,
-                size: 20,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  answer.deviceCheck
-                      ? 'Device check available: ${answer.deviceCheckReason}'
-                      : 'No device check needed: ${answer.deviceCheckReason}',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: foreground),
-                ),
-              ),
-            ],
-          ),
-          if (onRunDeviceCheck != null) ...[
-            const SizedBox(height: 8),
-            TextButton.icon(
-              onPressed: onRunDeviceCheck,
-              icon: PhosphorIcon(
-                PhosphorIcons.heartbeat(PhosphorIconsStyle.regular),
-                size: 18,
-              ),
-              label: const Text('Run device health check'),
-            ),
-          ],
+          _FaqReplyBody(answer: answer),
+          const SizedBox(height: 14),
+          const _ConversationActions(),
         ],
       ),
     );
   }
 }
 
-class _VideoCarousel extends StatelessWidget {
-  const _VideoCarousel({required this.titles});
+class _FaqAccordionCard extends StatelessWidget {
+  const _FaqAccordionCard({
+    required this.answer,
+    required this.isOpen,
+    required this.onTap,
+  });
 
-  final List<String> titles;
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (titles.length == 1) {
-          return _VideoCard(title: titles.first, width: constraints.maxWidth);
-        }
-
-        final cardWidth = (constraints.maxWidth - 48).clamp(280.0, 320.0);
-        return SizedBox(
-          height: 252,
-          child: ListView.separated(
-            clipBehavior: Clip.none,
-            scrollDirection: Axis.horizontal,
-            itemCount: titles.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 12),
-            itemBuilder: (context, index) {
-              return _VideoCard(title: titles[index], width: cardWidth);
-            },
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _VideoCard extends StatelessWidget {
-  const _VideoCard({required this.title, required this.width});
-
-  final String title;
-  final double width;
+  final SupportFaqAnswer answer;
+  final bool isOpen;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
 
-    return SizedBox(
-      width: width,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: 380 / 204,
-            child: Container(
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
-              ),
-              child: Stack(
+    return Material(
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
+        side: const BorderSide(
+          color: _secondaryStateLayerOpacity16,
+          width: 1.001,
+        ),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Positioned(
-                    left: 20,
-                    top: 24,
-                    child: SizedBox(
-                      width: 130,
-                      child: Text(
-                        title,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(color: colorScheme.onSurface),
+                  Expanded(
+                    child: Text(
+                      answer.title,
+                      style: textTheme.labelLarge?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
                       ),
                     ),
                   ),
-                  Align(
-                    alignment: Alignment.center,
-                    child: Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        color: colorScheme.primary,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.16),
-                            blurRadius: 14,
-                            offset: const Offset(0, 6),
-                          ),
-                        ],
-                      ),
-                      child: PhosphorIcon(
-                        PhosphorIcons.play(PhosphorIconsStyle.fill),
-                        color: colorScheme.onPrimary,
-                        size: 28,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    right: 8,
-                    bottom: 8,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.66),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        '1:41',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.labelSmall?.copyWith(color: Colors.white),
-                      ),
-                    ),
+                  const SizedBox(width: 8),
+                  PhosphorIcon(
+                    isOpen
+                        ? PhosphorIcons.caretUp(PhosphorIconsStyle.fill)
+                        : PhosphorIcons.caretDown(PhosphorIconsStyle.fill),
+                    color: colorScheme.onSurfaceVariant,
+                    size: 16,
                   ),
                 ],
               ),
+              AnimatedSwitcher(
+                duration: SupportMotionTokens.medium,
+                reverseDuration: SupportMotionTokens.short,
+                switchInCurve: SupportMotionTokens.emphasizedDecelerate,
+                switchOutCurve: SupportMotionTokens.emphasizedAccelerate,
+                transitionBuilder: (child, animation) {
+                  return SizeTransition(
+                    sizeFactor: animation,
+                    axisAlignment: -1,
+                    child: FadeTransition(opacity: animation, child: child),
+                  );
+                },
+                child: isOpen
+                    ? _FaqAccordionBody(
+                        key: ValueKey('open-${answer.title}'),
+                        answer: answer,
+                      )
+                    : const SizedBox(
+                        key: ValueKey('closed-faq'),
+                        width: double.infinity,
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FaqAccordionBody extends StatelessWidget {
+  const _FaqAccordionBody({super.key, required this.answer});
+
+  final SupportFaqAnswer answer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: _FaqReplyBody(answer: answer),
+    );
+  }
+}
+
+class _FaqReplyBody extends StatelessWidget {
+  const _FaqReplyBody({required this.answer});
+
+  final SupportFaqAnswer answer;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final videoTitles = answer.videoTitles;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          answer.title,
+          style: textTheme.bodyLarge?.copyWith(
+            color: colorScheme.onSurface,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          answer.answer,
+          style: textTheme.bodyLarge?.copyWith(color: colorScheme.onSurface),
+        ),
+        if (answer.steps.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (var index = 0; index < answer.steps.length; index++) ...[
+            Text(
+              '${index + 1}. ${answer.steps[index]}',
+              style: textTheme.bodyLarge?.copyWith(
+                color: colorScheme.onSurface,
+              ),
             ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(color: colorScheme.onSurface),
-          ),
+            if (index != answer.steps.length - 1) const SizedBox(height: 4),
+          ],
         ],
+        if (videoTitles.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          for (var index = 0; index < videoTitles.length; index++) ...[
+            _FaqVideoListItem(
+              title: videoTitles[index],
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (context) {
+                      return SupportVideoPlaybackScreen(
+                        title: videoTitles[index],
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+            if (index != videoTitles.length - 1) const SizedBox(height: 12),
+          ],
+        ],
+      ],
+    );
+  }
+}
+
+class _FaqVideoListItem extends StatelessWidget {
+  const _FaqVideoListItem({required this.title, required this.onTap});
+
+  final String title;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(SupportShapeTokens.extraSmall),
+        onTap: onTap,
+        child: Row(
+          children: [
+            Container(
+              width: 114,
+              height: 64,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(
+                  SupportShapeTokens.extraSmall,
+                ),
+              ),
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.48),
+                  shape: BoxShape.circle,
+                ),
+                child: PhosphorIcon(
+                  PhosphorIcons.play(PhosphorIconsStyle.fill),
+                  color: Colors.white,
+                  size: 18,
+                ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurface),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -955,7 +1666,7 @@ class _ResolutionChoices extends StatelessWidget {
     return _ReplyWidth(
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: colorScheme.outlineVariant.withValues(alpha: 0.16),
           borderRadius: BorderRadius.circular(8),
@@ -1010,14 +1721,19 @@ class _OutlinedResolutionButton extends StatelessWidget {
     return OutlinedButton(
       onPressed: onPressed,
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size.fromHeight(48),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+        minimumSize: const Size.fromHeight(32),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         side: BorderSide(color: colorScheme.outlineVariant),
         shape: const StadiumBorder(),
         foregroundColor: colorScheme.onSurfaceVariant,
         textStyle: Theme.of(context).textTheme.labelLarge,
       ),
-      child: FittedBox(fit: BoxFit.scaleDown, child: Text(label, maxLines: 1)),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
+      ),
     );
   }
 }
@@ -1122,7 +1838,7 @@ class _ActionChipButton extends StatelessWidget {
                       choice.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
                         color: colorScheme.onSurfaceVariant,
                       ),
                     ),
@@ -1137,87 +1853,197 @@ class _ActionChipButton extends StatelessWidget {
   }
 }
 
-class _HealthCheckResult extends StatelessWidget {
-  const _HealthCheckResult({
+class _HealthCheckReportMessage extends StatelessWidget {
+  const _HealthCheckReportMessage({
+    required this.device,
     required this.complete,
     required this.onRaiseTicket,
-    required this.onResolved,
+    required this.onAddAdditionalProblem,
   });
 
+  final _SupportDevice? device;
   final bool complete;
   final VoidCallback onRaiseTicket;
-  final VoidCallback onResolved;
+  final VoidCallback onAddAdditionalProblem;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final deviceLabel = device?.label ?? 'selected device';
 
     return _ReplyWidth(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
-              border: Border.all(color: colorScheme.outlineVariant),
+          Text(
+            'Device health check for $deviceLabel',
+            style: Theme.of(
+              context,
+            ).textTheme.bodyLarge?.copyWith(color: colorScheme.onSurface),
+          ),
+          const SizedBox(height: 16),
+          _HealthCheckReportCard(complete: complete),
+          if (complete) ...[
+            const SizedBox(height: 16),
+            Text(
+              'We detected an issue with your printer when we did the device check. If you want, I can raise a ticket for you and someone will get that checked.',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyLarge?.copyWith(color: colorScheme.onSurface),
             ),
+            const SizedBox(height: 14),
+            const _ConversationActions(),
+            const SizedBox(height: 16),
+            _QuickReplyChip(
+              label: 'Raise a ticket with the above issue',
+              onPressed: onRaiseTicket,
+            ),
+            const SizedBox(height: 8),
+            _QuickReplyChip(
+              label: 'Add additional problem',
+              onPressed: onAddAdditionalProblem,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _HealthCheckReportCard extends StatelessWidget {
+  const _HealthCheckReportCard({required this.complete});
+
+  final bool complete;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    final metrics = [
+      _HealthMetric(
+        label: 'Battery',
+        icon: PhosphorIcons.batteryEmpty(PhosphorIconsStyle.regular),
+        status: complete ? _HealthMetricStatus.ok : _HealthMetricStatus.pending,
+      ),
+      _HealthMetric(
+        label: 'Printer',
+        icon: PhosphorIcons.printer(PhosphorIconsStyle.regular),
+        status: complete
+            ? _HealthMetricStatus.error
+            : _HealthMetricStatus.pending,
+      ),
+      _HealthMetric(
+        label: 'Software',
+        icon: PhosphorIcons.androidLogo(PhosphorIconsStyle.regular),
+        status: complete ? _HealthMetricStatus.ok : _HealthMetricStatus.pending,
+      ),
+      _HealthMetric(
+        label: 'Network',
+        icon: PhosphorIcons.wifiHigh(PhosphorIconsStyle.regular),
+        status: complete ? _HealthMetricStatus.ok : _HealthMetricStatus.pending,
+      ),
+    ];
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(SupportShapeTokens.medium),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              'Health check report',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    PhosphorIcon(
-                      complete
-                          ? PhosphorIcons.warningCircle(
-                              PhosphorIconsStyle.regular,
-                            )
-                          : PhosphorIcons.clock(PhosphorIconsStyle.regular),
-                      color: complete
-                          ? colorScheme.error
-                          : colorScheme.onSurfaceVariant,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        complete
-                            ? 'Device health check completed'
-                            : 'Device health check running',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                    ),
+                    Expanded(child: _HealthMetricTile(metric: metrics[0])),
+                    const SizedBox(width: 11),
+                    Expanded(child: _HealthMetricTile(metric: metrics[1])),
                   ],
                 ),
                 const SizedBox(height: 12),
-                for (final line in SupportFaqContent.healthCheckSummary) ...[
-                  Text(
-                    line,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  if (line != SupportFaqContent.healthCheckSummary.last)
-                    const SizedBox(height: 6),
-                ],
+                Row(
+                  children: [
+                    Expanded(child: _HealthMetricTile(metric: metrics[2])),
+                    const SizedBox(width: 11),
+                    Expanded(child: _HealthMetricTile(metric: metrics[3])),
+                  ],
+                ),
               ],
             ),
           ),
-          const SizedBox(height: 16),
-          _ChoiceGroup(
-            choices: [
-              _ActionChoice(
-                label: 'It solved my problem',
-                icon: PhosphorIcons.checkCircle(PhosphorIconsStyle.regular),
-                onPressed: onResolved,
+        ],
+      ),
+    );
+  }
+}
+
+enum _HealthMetricStatus { pending, ok, error }
+
+class _HealthMetric {
+  const _HealthMetric({
+    required this.label,
+    required this.icon,
+    required this.status,
+  });
+
+  final String label;
+  final IconData icon;
+  final _HealthMetricStatus status;
+}
+
+class _HealthMetricTile extends StatelessWidget {
+  const _HealthMetricTile({required this.metric});
+
+  final _HealthMetric metric;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Container(
+      constraints: const BoxConstraints(minHeight: 60),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(SupportShapeTokens.small),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          PhosphorIcon(
+            metric.icon,
+            size: 20,
+            color: colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  metric.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ),
-              _ActionChoice(
-                label: 'Raise a ticket',
-                icon: PhosphorIcons.ticket(PhosphorIconsStyle.regular),
-                onPressed: onRaiseTicket,
-              ),
+              const SizedBox(width: 4),
+              _HealthMetricStatusIcon(status: metric.status),
             ],
           ),
         ],
@@ -1226,8 +2052,198 @@ class _HealthCheckResult extends StatelessWidget {
   }
 }
 
-class _ConversationClosedPanel extends StatelessWidget {
-  const _ConversationClosedPanel({required this.onRestart});
+class _HealthMetricStatusIcon extends StatelessWidget {
+  const _HealthMetricStatusIcon({required this.status});
+
+  final _HealthMetricStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return SizedBox(
+      width: 20,
+      height: 20,
+      child: switch (status) {
+        _HealthMetricStatus.pending => CircularProgressIndicator(
+          strokeWidth: 2,
+          color: colorScheme.onSurfaceVariant,
+        ),
+        _HealthMetricStatus.ok => PhosphorIcon(
+          PhosphorIcons.checkCircle(PhosphorIconsStyle.fill),
+          size: 20,
+          color: _healthCheckSuccess,
+        ),
+        _HealthMetricStatus.error => PhosphorIcon(
+          PhosphorIcons.xCircle(PhosphorIconsStyle.fill),
+          size: 20,
+          color: colorScheme.error,
+        ),
+      },
+    );
+  }
+}
+
+class _SelectionBottomSheet<T> extends StatelessWidget {
+  const _SelectionBottomSheet({
+    required this.title,
+    required this.options,
+    required this.optionLabel,
+    this.selected,
+  });
+
+  final String title;
+  final List<T> options;
+  final T? selected;
+  final String Function(T option) optionLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.58;
+
+    return SafeArea(
+      top: false,
+      child: Container(
+        constraints: BoxConstraints(maxHeight: maxHeight, minHeight: 280),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerLow,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(SupportShapeTokens.extraLarge),
+          ),
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Container(
+                width: 32,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colorScheme.outline,
+                  borderRadius: BorderRadius.circular(SupportShapeTokens.full),
+                ),
+              ),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                padding: EdgeInsets.zero,
+                itemCount: options.length,
+                itemBuilder: (context, index) {
+                  final option = options[index];
+                  return _SelectionListItem<T>(
+                    option: option,
+                    selected: selected,
+                    label: optionLabel(option),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SelectionListItem<T> extends StatelessWidget {
+  const _SelectionListItem({
+    required this.option,
+    required this.selected,
+    required this.label,
+  });
+
+  final T option;
+  final T? selected;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return InkWell(
+      onTap: () => Navigator.of(context).pop(option),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              _SelectionRadio(isSelected: option == selected),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: colorScheme.onSurface,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SelectionRadio extends StatelessWidget {
+  const _SelectionRadio({required this.isSelected});
+
+  final bool isSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final color = isSelected
+        ? colorScheme.primary
+        : colorScheme.onSurfaceVariant;
+
+    return SizedBox(
+      width: 24,
+      height: 24,
+      child: Center(
+        child: Container(
+          width: 20,
+          height: 20,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: color, width: 2),
+          ),
+          child: isSelected
+              ? Center(
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: colorScheme.primary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+}
+
+class _ConversationClosedFooter extends StatelessWidget {
+  const _ConversationClosedFooter({super.key, required this.onRestart});
 
   final VoidCallback onRestart;
 
@@ -1235,25 +2251,23 @@ class _ConversationClosedPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return _ReplyWidth(
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: colorScheme.outlineVariant.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'This conversation is closed, For any other query start a new chat or email us at support@pinelabs.com',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+    return Container(
+      width: double.infinity,
+      color: colorScheme.outlineVariant.withValues(alpha: 0.16),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This conversation is closed, For any other query start a new chat or email us at support@pinelabs.com',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: colorScheme.onSurfaceVariant,
             ),
-            const SizedBox(height: 12),
-            FilledButton(
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
               onPressed: onRestart,
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
@@ -1264,8 +2278,8 @@ class _ConversationClosedPanel extends StatelessWidget {
               ),
               child: const Text('Start new chat'),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1377,11 +2391,14 @@ class _TicketDetail extends StatelessWidget {
 
 class _ConversationInputBar extends StatefulWidget {
   const _ConversationInputBar({
+    super.key,
     required this.controller,
+    required this.focusNode,
     required this.onSubmitted,
   });
 
   final TextEditingController controller;
+  final FocusNode focusNode;
   final VoidCallback onSubmitted;
 
   @override
@@ -1432,7 +2449,7 @@ class _ConversationInputBarState extends State<_ConversationInputBar> {
                 borderRadius: BorderRadius.circular(SupportShapeTokens.full),
               ),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   SizedBox(
                     width: 48,
@@ -1449,8 +2466,10 @@ class _ConversationInputBarState extends State<_ConversationInputBar> {
                   Expanded(
                     child: TextField(
                       controller: widget.controller,
+                      focusNode: widget.focusNode,
                       onSubmitted: (_) => widget.onSubmitted(),
                       textInputAction: TextInputAction.send,
+                      textAlignVertical: TextAlignVertical.center,
                       minLines: 1,
                       maxLines: 3,
                       decoration: const InputDecoration(
@@ -1459,7 +2478,8 @@ class _ConversationInputBarState extends State<_ConversationInputBar> {
                         focusedBorder: InputBorder.none,
                         filled: false,
                         hintText: 'Type your query',
-                        contentPadding: EdgeInsets.symmetric(vertical: 18),
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(vertical: 16),
                       ),
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: colorScheme.onSurface,
@@ -1475,34 +2495,56 @@ class _ConversationInputBarState extends State<_ConversationInputBar> {
           SizedBox(
             width: 56,
             height: 56,
-            child: hasText
-                ? IconButton.filled(
-                    tooltip: 'Send message',
-                    onPressed: widget.onSubmitted,
-                    style: IconButton.styleFrom(
-                      fixedSize: const Size(56, 56),
-                      padding: EdgeInsets.zero,
-                      backgroundColor: colorScheme.primary,
-                      foregroundColor: colorScheme.onPrimary,
+            child: AnimatedSwitcher(
+              duration: SupportMotionTokens.short,
+              switchInCurve: SupportMotionTokens.emphasizedDecelerate,
+              switchOutCurve: SupportMotionTokens.emphasizedAccelerate,
+              transitionBuilder: (child, animation) {
+                final scaleAnimation = Tween<double>(begin: 0.88, end: 1)
+                    .animate(
+                      CurvedAnimation(
+                        parent: animation,
+                        curve: SupportMotionTokens.emphasizedDecelerate,
+                        reverseCurve: SupportMotionTokens.emphasizedAccelerate,
+                      ),
+                    );
+
+                return FadeTransition(
+                  opacity: animation,
+                  child: ScaleTransition(scale: scaleAnimation, child: child),
+                );
+              },
+              child: hasText
+                  ? IconButton.filled(
+                      key: const ValueKey('send-message-button'),
+                      tooltip: 'Send message',
+                      onPressed: widget.onSubmitted,
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size(56, 56),
+                        padding: EdgeInsets.zero,
+                        backgroundColor: colorScheme.primary,
+                        foregroundColor: colorScheme.onPrimary,
+                      ),
+                      icon: PhosphorIcon(
+                        PhosphorIcons.arrowUp(PhosphorIconsStyle.regular),
+                        size: 24,
+                      ),
+                    )
+                  : IconButton.filledTonal(
+                      key: const ValueKey('voice-input-button'),
+                      tooltip: 'Voice input',
+                      onPressed: widget.onSubmitted,
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size(56, 56),
+                        padding: EdgeInsets.zero,
+                        backgroundColor: colorScheme.surfaceContainerHigh,
+                      ),
+                      icon: PhosphorIcon(
+                        PhosphorIcons.microphone(PhosphorIconsStyle.regular),
+                        size: 24,
+                      ),
                     ),
-                    icon: PhosphorIcon(
-                      PhosphorIcons.arrowUp(PhosphorIconsStyle.regular),
-                      size: 24,
-                    ),
-                  )
-                : IconButton.filledTonal(
-                    tooltip: 'Voice input',
-                    onPressed: widget.onSubmitted,
-                    style: IconButton.styleFrom(
-                      fixedSize: const Size(56, 56),
-                      padding: EdgeInsets.zero,
-                      backgroundColor: colorScheme.surfaceContainerHigh,
-                    ),
-                    icon: PhosphorIcon(
-                      PhosphorIcons.microphone(PhosphorIconsStyle.regular),
-                      size: 24,
-                    ),
-                  ),
+            ),
           ),
         ],
       ),
